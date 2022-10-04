@@ -7,7 +7,7 @@ query_args <- function(l) {
 statistic_form_values <- function(by, state, cancer, race, sex, age) {
   ret <- list()
   if(by == "county" && (is.null(state) || state == "all")) {
-    ret$state = "99"
+    ret$state = "00"
   }
   else if(by == "county" && !is.null(state)) {
     stopifnot(state %in% tolower(maps::state.fips$abb))
@@ -17,6 +17,10 @@ statistic_form_values <- function(by, state, cancer, race, sex, age) {
   else if(by == "state") {
     ret$state = "00"
   }
+
+  if(by == "state") ret$areatype = "state"
+  if(by == "county") ret$areatype = "county"
+  if(by == "hsa") ret$areatype = "hsa"
 
   ret$cancer <- cancer_value(cancer)
   ret$race <- race_value(race)
@@ -31,6 +35,7 @@ incidence_table_url <- function(by, state, cancer, race, sex, age) {
 
   args <- list(
     stateFIPS = vals$state,
+    areatype = vals$areatype,
     cancer = vals$cancer,
     race = vals$race,
     type = "incd",
@@ -51,43 +56,65 @@ incidence_table_url <- function(by, state, cancer, race, sex, age) {
 mortality_table_url <- function(by, state, cancer, race, sex, age) {
   vals <- statistic_form_values(by, state, cancer, race, sex, age)
 
-  args <- paste0(c(vals$state, vals$cancer, vals$race, vals$sex, vals$age, "0", "1", "1", "6"), collapse = "&")
-  url <- paste0("https://statecancerprofiles.cancer.gov/cgi-bin/deathrates/data.pl/death.csv?", args)
+  args <- list(
+    stateFIPS = vals$state,
+    areatype = vals$areatype,
+    cancer = vals$cancer,
+    race = vals$race,
+    type = "death",
+    sortVariableName = "rate",
+    sortOrder = "desc",
+    output = "1"
+  )
+
+  if(!(cancer %in% c("childhood (ages <20, all sites)", "childhood (ages <15, all sites)"))) {
+    args$age = vals$age
+  }
+
+  url <- paste0("https://statecancerprofiles.cancer.gov/deathrates/index.php?", query_args(args))
 
   return(url)
 }
 
 #' @importFrom utils download.file
-download_csv <- function(url, dest = tempfile(), delete_rows = c(), skip = 0, ...) {
-  download.file(url, destfile = dest, mode="wb")
+download_csv <- function(url,
+                         dest = tempfile(),
+                         delete_rows = c(),
+                         skip = 0,
+                         ...) {
+  readr::read_csv(url, skip = skip) |>
+    dplyr::filter(!is.na(FIPS))
 
-  # readlines complains when downloading mortality data that the last line isn't complete
-  # so we manually add a final endline character to be safe
-  out <- file(dest, 'a')
-  write("\n", file = out, append = TRUE)
-  close(out)
 
-  raw <- readLines(dest)
-
-  # Pilcrows are used to indicate when data is not available.
-  # replace pilcrows with "p"s for easier text handling.
-  raw <- stringr::str_replace_all(raw, "\U00B6", "p")
-
-  if(length(delete_rows) > 0) {
-    raw <- raw[-delete_rows]
-  }
-
-  # Cut off the first lines
-  raw <- raw[skip:length(raw)]
-
-  # Find the first blank line, then cut off everything after
-  last_row <- min(which(raw == ""))
-  raw <- raw[1:last_row]
-
-  dat <- readr::read_csv(paste(raw, collapse="\n"), ...)
-  readr::write_csv(dat, dest)
-
-  return(dat)
+  # download.file(url, destfile = dest, mode = "wb")
+  #
+  # # readlines complains when downloading mortality data that the last line isn't complete
+  # # so we manually add a final endline character to be safe
+  # out <- file(dest, 'a')
+  # write("\n", file = out, append = TRUE)
+  # close(out)
+  #
+  # raw <- readLines(dest)
+  #
+  # # Pilcrows are used to indicate when data is not available.
+  # # replace pilcrows with "p"s for easier text handling.
+  # raw <- stringr::str_replace_all(raw, "\U00B6", "p")
+  #
+  # if(length(delete_rows) > 0) {
+  #   raw <- raw[-delete_rows]
+  # }
+  #
+  # # Cut off the first lines
+  # raw <- raw[skip:length(raw)]
+  #
+  # # Find the first blank line, then cut off everything after
+  # last_row <- min(which(raw == ""))
+  # raw <- raw[1:last_row]
+  #
+  # dat <- readr::read_csv(paste(raw, collapse="\n"), ...)
+  # readr::write_csv(dat, dest)
+  #
+  # return(dat)
 }
 
 #' Download cancer incidence or mortality data.
@@ -147,66 +174,15 @@ cancer_statistics <- function(statistic = "incidence", by = "county", state = NU
 
   if(statistic == "incidence") {
     url <- incidence_table_url(by, state, cancer, race, sex, age)
-    skip = 10
-    delete_rows = c()
-    col_names <- c(
-      "county",
-      "fips",
-      "incidence_rate",
-      "incidence_rate_95_confint_lower",
-      "incidence_rate_95_confint_upper",
-      "average_annual_count",
-      "recent_trend_description",
-      "recent_trend",
-      "recent_trend_95_confint_lower",
-      "recent_trend_95_confint_upper"
-    )
-
-    value_columns = col_names[c(3:6, 8:10)]
-  }
-  else {
+    skip = 7
+  } else {
     url <- mortality_table_url(by, state, cancer, race, sex, age)
-    skip = 13
-    value_column = "mortality_rate"
-    delete_rows <- c(13)
-    col_names <- c(
-      "county",
-      "fips",
-      "met_objective",
-      "mortality_rate",
-      "mortality_rate_95_confint_lower",
-      "mortality_rate_95_confint_upper",
-      "average_deaths_per_year",
-      "recent_trend",
-      "recent_5_year_trend",
-      "recent_trend_95_confint_lower",
-      "recent_trend_95_confint_upper"
-    )
+    skip = 7
+    }
 
-    value_columns = col_names[c(4:7, 9:11)]
-  }
-
-  dat <- download_csv(url,
-                      delete_rows = delete_rows,
-                      skip = skip,
-                      col_names = col_names,
-                      col_types = strrep("c", length(col_names)))
-
-  dat$statistic = statistic
-  dat$cancer = cancer
-  dat$sex = sex
-  dat$age = age
-  dat$race = race
-
-  for(value_column in value_columns) {
-    dat[[value_column]] <- stringr::str_replace_all(dat[[value_column]], "3 or fewer", "")
-    dat[[value_column]] <- stringr::str_replace_all(dat[[value_column]], "[p#* ,]", "")
-
-    dat[[value_column]][dat[[value_column]] == ""] <- NA
-    dat[[value_column]] <- as.numeric(dat[[value_column]])
-  }
-
-  dat$fips <- as.numeric(dat$fips)
-
-  return(dat)
+  download_csv(url,
+               delete_rows = delete_rows,
+               skip = skip,
+               col_names = col_names,
+               col_types = strrep("c", length(col_names)))
 }
